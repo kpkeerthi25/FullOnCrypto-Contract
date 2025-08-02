@@ -1,0 +1,237 @@
+const hre = require("hardhat");
+const fs = require("fs");
+const path = require("path");
+
+async function main() {
+  // Get command line arguments
+  const args = process.argv.slice(2);
+  
+  if (args.length < 2) {
+    console.error("Usage: node scripts/deploy-with-params.js <chainId> <privateKey> [daiTokenAddress]");
+    console.error("Example: node scripts/deploy-with-params.js 1337 your_private_key_here");
+    console.error("Note: If daiTokenAddress is not provided, MockDAI will be deployed and used for non-mainnet chains");
+    process.exit(1);
+  }
+
+  const chainId = parseInt(args[0]);
+  const privateKey = args[1];
+  const providedDaiAddress = args[2]; // Optional third argument
+
+  if (!chainId || !privateKey) {
+    console.error("Invalid chainId or privateKey provided");
+    process.exit(1);
+  }
+
+  // Validate private key format (should start with 0x and be 64 hex chars)
+  if (!privateKey.startsWith('0x') || privateKey.length !== 66) {
+    console.error("Private key must be in format 0x followed by 64 hex characters");
+    process.exit(1);
+  }
+
+  console.log(`Deploying contracts with:`);
+  console.log(`Chain ID: ${chainId}`);
+  console.log(`Private Key: ${privateKey.substring(0, 10)}...${privateKey.substring(privateKey.length - 4)}`);
+
+  // Create a provider and wallet
+  let rpcUrl;
+  let networkName;
+  
+  // Determine RPC URL and DAI strategy based on chain ID
+  let isMainnet = false;
+  switch (chainId) {
+    case 1337:
+      rpcUrl = "http://127.0.0.1:8545";
+      networkName = "localhost";
+      break;
+    case 84532:
+      rpcUrl = "https://sepolia.base.org";
+      networkName = "base-sepolia";
+      break;
+    case 8453:
+      rpcUrl = "https://mainnet.base.org";
+      networkName = "base";
+      isMainnet = true;
+      break;
+    default:
+      console.error(`Unsupported chain ID: ${chainId}`);
+      console.error("Supported chain IDs: 1337 (localhost), 84532 (base-sepolia), 8453 (base)");
+      process.exit(1);
+  }
+
+  // Determine DAI token address strategy
+  let daiTokenAddress;
+  let shouldDeployMockDAI = false;
+
+  if (providedDaiAddress) {
+    // Use provided DAI address
+    daiTokenAddress = providedDaiAddress;
+    console.log(`Using provided DAI token address: ${daiTokenAddress}`);
+  } else if (isMainnet) {
+    // Use real DAI address for mainnet
+    daiTokenAddress = "0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb"; // Base mainnet DAI
+    console.log(`Using Base mainnet DAI address: ${daiTokenAddress}`);
+  } else {
+    // Deploy MockDAI for testnets and localhost
+    shouldDeployMockDAI = true;
+    console.log(`Will deploy MockDAI for testing on ${networkName}`);
+  }
+
+  // Create deployer based on network type
+  let deployer;
+  
+  if (chainId === 1337) {
+    // For localhost, use Hardhat's built-in network and signers
+    const signers = await hre.ethers.getSigners();
+    // Find the signer that matches our private key
+    const wallet = new hre.ethers.Wallet(privateKey);
+    const targetAddress = wallet.address;
+    
+    // Check if the address matches any of the default Hardhat accounts
+    deployer = signers.find(signer => signer.address.toLowerCase() === targetAddress.toLowerCase());
+    
+    if (!deployer) {
+      // If not found in default accounts, create a custom wallet with Hardhat provider
+      deployer = wallet.connect(hre.ethers.provider);
+    }
+  } else {
+    // For other networks, create custom provider and wallet
+    const provider = new hre.ethers.providers.JsonRpcProvider(rpcUrl);
+    deployer = new hre.ethers.Wallet(privateKey, provider);
+  }
+  console.log("Deploying with account:", deployer.address);
+  
+  const balance = await deployer.getBalance();
+  console.log("Account balance:", hre.ethers.utils.formatEther(balance), "ETH");
+
+  if (balance.eq(0)) {
+    console.error("Deployer account has no balance. Please fund the account before deployment.");
+    process.exit(1);
+  }
+
+  let mockDAI = null;
+  
+  // Deploy MockDAI if needed
+  if (shouldDeployMockDAI) {
+    console.log("\n=== Deploying MockDAI Contract ===");
+    
+    const MockDAI = await hre.ethers.getContractFactory("MockDAI", deployer);
+    console.log("Deploying MockDAI...");
+    mockDAI = await MockDAI.deploy();
+    await mockDAI.deployed();
+    
+    daiTokenAddress = mockDAI.address;
+    console.log("MockDAI deployed to:", mockDAI.address);
+    console.log("MockDAI deployer balance:", hre.ethers.utils.formatEther(await mockDAI.balanceOf(deployer.address)), "DAI");
+  }
+
+  console.log("\n=== Deploying PaymentEscrow Contract ===");
+  
+  // Deploy PaymentEscrow with DAI token address
+  const PaymentEscrow = await hre.ethers.getContractFactory("PaymentEscrow", deployer);
+  console.log(`Deploying PaymentEscrow with DAI token: ${daiTokenAddress}`);
+  const paymentEscrow = await PaymentEscrow.deploy(daiTokenAddress);
+  await paymentEscrow.deployed();
+  
+  console.log("PaymentEscrow deployed to:", paymentEscrow.address);
+  console.log("PaymentEscrow owner:", deployer.address);
+  console.log("PaymentEscrow DAI token:", await paymentEscrow.DAI_TOKEN());
+
+  // Create deployment info object
+  const deploymentInfo = {
+    network: networkName,
+    chainId: chainId,
+    deployer: deployer.address,
+    timestamp: new Date().toISOString(),
+    daiTokenAddress: daiTokenAddress,
+    mockDAIDeployed: shouldDeployMockDAI,
+    contracts: {
+      PaymentEscrow: {
+        address: paymentEscrow.address,
+        transactionHash: paymentEscrow.deployTransaction.hash,
+        daiToken: daiTokenAddress
+      }
+    }
+  };
+
+  // Add MockDAI info if it was deployed
+  if (mockDAI) {
+    deploymentInfo.contracts.MockDAI = {
+      address: mockDAI.address,
+      transactionHash: mockDAI.deployTransaction.hash
+    };
+  }
+
+  // Save deployment info to file
+  const deploymentInfoPath = path.join(__dirname, '..', `deployment-${chainId}-${Date.now()}.json`);
+  fs.writeFileSync(deploymentInfoPath, JSON.stringify(deploymentInfo, null, 2));
+  console.log(`\nDeployment info saved to: ${deploymentInfoPath}`);
+
+  // Contract verification for supported networks
+  if (networkName === "base" || networkName === "base-sepolia") {
+    console.log("\n=== Contract Verification ===");
+    console.log("Waiting for block confirmations...");
+    
+    try {
+      // Wait for confirmations
+      if (mockDAI) {
+        await mockDAI.deployTransaction.wait(6);
+      }
+      await paymentEscrow.deployTransaction.wait(6);
+      
+      // Verify MockDAI if deployed
+      if (mockDAI) {
+        console.log("Attempting to verify MockDAI...");
+        try {
+          await hre.run("verify:verify", {
+            address: mockDAI.address,
+            constructorArguments: []
+          });
+          console.log("MockDAI verified successfully");
+        } catch (error) {
+          console.log("MockDAI verification failed:", error.message);
+        }
+      }
+
+      console.log("Attempting to verify PaymentEscrow...");
+      try {
+        await hre.run("verify:verify", {
+          address: paymentEscrow.address,
+          constructorArguments: [daiTokenAddress]
+        });
+        console.log("PaymentEscrow verified successfully");
+      } catch (error) {
+        console.log("PaymentEscrow verification failed:", error.message);
+      }
+      
+    } catch (error) {
+      console.log("Verification process failed:", error.message);
+    }
+  }
+
+  console.log("\n=== Deployment Summary ===");
+  console.log(`Network: ${networkName} (Chain ID: ${chainId})`);
+  console.log(`Deployer: ${deployer.address}`);
+  console.log(`DAI Token Address: ${daiTokenAddress}`);
+  if (mockDAI) {
+    console.log(`MockDAI Address: ${mockDAI.address} (deployed for testing)`);
+  } else {
+    console.log(`Using existing DAI token: ${daiTokenAddress}`);
+  }
+  console.log(`PaymentEscrow Address: ${paymentEscrow.address}`);
+  console.log(`Deployment completed successfully!`);
+
+  // Final balance check
+  const finalBalance = await deployer.getBalance();
+  const gasUsed = balance.sub(finalBalance);
+  console.log(`Gas used: ${hre.ethers.utils.formatEther(gasUsed)} ETH`);
+  console.log(`Final balance: ${hre.ethers.utils.formatEther(finalBalance)} ETH`);
+}
+
+// We recommend this pattern to be able to use async/await everywhere
+// and properly handle errors.
+main()
+  .then(() => process.exit(0))
+  .catch((error) => {
+    console.error("Deployment failed:", error);
+    process.exit(1);
+  });

@@ -31,6 +31,10 @@ module.exports = {
     hardhat: {
       chainId: 1337
     },
+    localhost: {
+      url: "http://127.0.0.1:8545",
+      chainId: 1337
+    },
     "base-sepolia": {
       url: "https://sepolia.base.org",
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],

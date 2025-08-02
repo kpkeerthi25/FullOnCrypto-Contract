@@ -6,9 +6,10 @@
   "scripts": {
     "compile": "hardhat compile",
     "test": "hardhat test",
-    "deploy": "hardhat run scripts/deploy.js",
-    "deploy:base": "hardhat run scripts/deploy.js --network base",
-    "deploy:base-testnet": "hardhat run scripts/deploy.js --network base-sepolia"
+    "deploy": "echo 'Use: ./deploy.sh <chainId> <privateKey>' && echo 'Example: ./deploy.sh 1337 0x...' && exit 1",
+    "deploy:localhost": "node scripts/deploy-with-params.js 1337",
+    "deploy:base-sepolia": "node scripts/deploy-with-params.js 84532",
+    "deploy:base": "node scripts/deploy-with-params.js 8453"
   },
   "keywords": [
     "solidity",

@@ -85,10 +85,12 @@ contract PaymentEscrow is ReentrancyGuard, Ownable {
     // Duration for commitment timeout (5 minutes)
     uint256 public constant COMMITMENT_TIMEOUT = 5 minutes;
     
-    // DAI token address on Base L2
-    address public constant DAI_TOKEN = 0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb;
+    // DAI token address (configurable during deployment)
+    address public immutable DAI_TOKEN;
     
-    constructor() Ownable() {
+    constructor(address _daiToken) Ownable() {
+        require(_daiToken != address(0), "DAI token address cannot be zero");
+        DAI_TOKEN = _daiToken;
         // Contract creator becomes the owner and fee recipient
     }
     
