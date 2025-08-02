@@ -202,6 +202,8 @@ contract PaymentEscrow is ReentrancyGuard, Ownable {
         require(block.timestamp <= request.expiresAt, "Request expired");
         require(msg.sender == request.payer, "Only committed payer can fulfill");
         require(block.timestamp <= request.committedAt + COMMITMENT_TIMEOUT, "Commitment timed out");
+
+        // Mocking the UPI transaction status validation because it requires Payment Gateway license
         require(bytes(_transactionNumber).length == 12, "Transaction number must be exactly 12 digits");
         require(isNumericString(_transactionNumber), "Transaction number must contain only digits");
         
