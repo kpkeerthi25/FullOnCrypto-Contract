@@ -121,7 +121,17 @@ async function main() {
     
     daiTokenAddress = mockDAI.address;
     console.log("MockDAI deployed to:", mockDAI.address);
-    console.log("MockDAI deployer balance:", hre.ethers.utils.formatEther(await mockDAI.balanceOf(deployer.address)), "DAI");
+    
+    // Wait a bit for the contract to be properly deployed before calling methods
+    console.log("Waiting for MockDAI deployment to be confirmed...");
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    try {
+      const deployerDAIBalance = await mockDAI.balanceOf(deployer.address);
+      console.log("MockDAI deployer balance:", hre.ethers.utils.formatEther(deployerDAIBalance), "DAI");
+    } catch (error) {
+      console.log("Note: Could not fetch MockDAI balance immediately after deployment (this is normal)");
+    }
   }
 
   console.log("\n=== Deploying PaymentEscrow Contract ===");
@@ -134,7 +144,17 @@ async function main() {
   
   console.log("PaymentEscrow deployed to:", paymentEscrow.address);
   console.log("PaymentEscrow owner:", deployer.address);
-  console.log("PaymentEscrow DAI token:", await paymentEscrow.DAI_TOKEN());
+  
+  // Wait a bit for the contract to be properly deployed before calling methods
+  console.log("Waiting for PaymentEscrow deployment to be confirmed...");
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  
+  try {
+    const daiTokenFromContract = await paymentEscrow.DAI_TOKEN();
+    console.log("PaymentEscrow DAI token:", daiTokenFromContract);
+  } catch (error) {
+    console.log("Note: Could not fetch DAI token address immediately after deployment (this is normal)");
+  }
 
   // Create deployment info object
   const deploymentInfo = {

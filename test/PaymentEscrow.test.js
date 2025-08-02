@@ -2,164 +2,213 @@ const { expect } = require("chai");
 const { ethers } = require("hardhat");
 
 describe("PaymentEscrow", function () {
-  let PaymentEscrow;
   let paymentEscrow;
+  let mockDAI;
   let owner;
   let requester;
   let payer;
   let addrs;
 
   beforeEach(async function () {
-    // Get the ContractFactory and Signers here.
-    PaymentEscrow = await ethers.getContractFactory("PaymentEscrow");
     [owner, requester, payer, ...addrs] = await ethers.getSigners();
 
-    // Deploy a fresh contract for each test
-    paymentEscrow = await PaymentEscrow.deploy(owner.address);
+    // Deploy MockDAI
+    const MockDAI = await ethers.getContractFactory("MockDAI");
+    mockDAI = await MockDAI.deploy();
+    await mockDAI.deployed();
+
+    // Deploy PaymentEscrow with MockDAI address
+    const PaymentEscrow = await ethers.getContractFactory("PaymentEscrow");
+    paymentEscrow = await PaymentEscrow.deploy(mockDAI.address);
     await paymentEscrow.deployed();
+
+    // Give users some DAI for testing
+    await mockDAI.connect(requester).faucet(); // 1000 DAI
+    await mockDAI.connect(payer).faucet(); // 1000 DAI
   });
 
   describe("Payment Request Creation", function () {
     it("Should create a payment request with crypto deposit", async function () {
-      const requestId = ethers.utils.hexZeroPad("0x12345678901234567890123456789012", 16); // 16 bytes UUID
-      const amountINR = ethers.utils.parseEther("1000"); // 1000 INR  
-      const tokenAmount = ethers.utils.parseEther("0.01"); // 0.01 ETH
-      const ethFee = ethers.utils.parseEther("0.001"); // 0.001 ETH fee
+      const amountINR = 1000; // ₹1000
+      const daiAmount = ethers.utils.parseUnits("100", 18); // 100 DAI
+      const ethFee = ethers.utils.parseEther("0.1"); // 0.1 ETH (includes platform fee)
+
+      // Approve DAI spending
+      await mockDAI.connect(requester).approve(paymentEscrow.address, daiAmount);
 
       await expect(
         paymentEscrow.connect(requester).createPaymentRequest(
-          requestId, 
-          amountINR, 
-          ethers.constants.AddressZero, // ETH deposit
-          tokenAmount,
-          {
-            value: tokenAmount.add(ethFee) // Total ETH sent
-          }
+          amountINR,
+          daiAmount,
+          { value: ethFee }
         )
       )
-        .to.emit(paymentEscrow, "PaymentRequestCreated")
-        .withArgs(requestId, requester.address, amountINR, ethers.constants.AddressZero, tokenAmount, tokenAmount.add(ethFee), await getExpectedExpiryTime());
+        .to.emit(paymentEscrow, "PaymentRequestCreated");
 
-      const request = await paymentEscrow.getPaymentRequest(requestId);
+      const request = await paymentEscrow.getPaymentRequest(1);
       expect(request.requester).to.equal(requester.address);
       expect(request.amountINR).to.equal(amountINR);
-      expect(request.tokenAmount).to.equal(tokenAmount);
-      expect(request.ethFee).to.equal(tokenAmount.add(ethFee));
+      expect(request.daiAmount).to.equal(daiAmount);
       expect(request.status).to.equal(0); // PENDING
     });
 
     it("Should fail to create request with zero crypto deposit", async function () {
-      const requestId = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("test-request-2"));
-      const amountINR = ethers.utils.parseEther("1000");
+      const amountINR = 1000;
+      const daiAmount = ethers.utils.parseUnits("100", 18);
+
+      // Approve DAI spending
+      await mockDAI.connect(requester).approve(paymentEscrow.address, daiAmount);
 
       await expect(
-        paymentEscrow.connect(requester).createPaymentRequest(requestId, amountINR, {
-          value: 0
-        })
-      ).to.be.revertedWith("Must deposit crypto");
+        paymentEscrow.connect(requester).createPaymentRequest(
+          amountINR,
+          daiAmount,
+          { value: 0 }
+        )
+      ).to.be.revertedWith("Must pay atleast equal to platform fee");
     });
 
-    it("Should fail to create request with duplicate request ID", async function () {
-      const requestId = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("test-request-3"));
-      const amountINR = ethers.utils.parseEther("1000");
-      const cryptoDeposit = ethers.utils.parseEther("0.01");
+    it("Should auto-increment request IDs", async function () {
+      const amountINR = 1000;
+      const daiAmount = ethers.utils.parseUnits("100", 18);
+      const ethFee = ethers.utils.parseEther("0.1");
 
-      // Create first request
-      await paymentEscrow.connect(requester).createPaymentRequest(requestId, amountINR, {
-        value: cryptoDeposit
-      });
+      // First request
+      await mockDAI.connect(requester).approve(paymentEscrow.address, daiAmount);
+      await paymentEscrow.connect(requester).createPaymentRequest(
+        amountINR,
+        daiAmount,
+        { value: ethFee }
+      );
 
-      // Try to create duplicate
-      await expect(
-        paymentEscrow.connect(requester).createPaymentRequest(requestId, amountINR, {
-          value: cryptoDeposit
-        })
-      ).to.be.revertedWith("Request ID already exists");
+      // Second request
+      await mockDAI.connect(requester).approve(paymentEscrow.address, daiAmount);
+      await paymentEscrow.connect(requester).createPaymentRequest(
+        amountINR,
+        daiAmount,
+        { value: ethFee }
+      );
+
+      const request1 = await paymentEscrow.getPaymentRequest(1);
+      const request2 = await paymentEscrow.getPaymentRequest(2);
+
+      expect(request1.requestId).to.equal(1);
+      expect(request2.requestId).to.equal(2);
+      expect(await paymentEscrow.getNextRequestId()).to.equal(3);
     });
   });
 
   describe("Payment Fulfillment", function () {
-    let requestId;
+    let requestId = 1;
     let amountINR;
-    let cryptoDeposit;
+    let daiAmount;
+    let ethFee;
 
     beforeEach(async function () {
-      requestId = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("test-fulfill"));
-      amountINR = ethers.utils.parseEther("1000");
-      cryptoDeposit = ethers.utils.parseEther("0.01");
+      amountINR = 1000;
+      daiAmount = ethers.utils.parseUnits("100", 18);
+      ethFee = ethers.utils.parseEther("0.1");
 
-      await paymentEscrow.connect(requester).createPaymentRequest(requestId, amountINR, {
-        value: cryptoDeposit
-      });
+      // Create a payment request
+      await mockDAI.connect(requester).approve(paymentEscrow.address, daiAmount);
+      await paymentEscrow.connect(requester).createPaymentRequest(
+        amountINR,
+        daiAmount,
+        { value: ethFee }
+      );
     });
 
-    it("Should fulfill payment and transfer crypto to payer", async function () {
-      const payerBalanceBefore = await payer.getBalance();
+    it("Should commit and fulfill payment", async function () {
+      // Commit to payment
+      await paymentEscrow.connect(payer).commitToPay(requestId);
 
-      await expect(paymentEscrow.connect(payer).fulfillPayment(requestId))
-        .to.emit(paymentEscrow, "PaymentFulfilled")
-        .withArgs(requestId, payer.address, cryptoDeposit);
+      const payerDAIBalanceBefore = await mockDAI.balanceOf(payer.address);
+      const payerETHBalanceBefore = await payer.getBalance();
 
-      // Check that crypto was transferred to payer
-      const payerBalanceAfter = await payer.getBalance();
-      expect(payerBalanceAfter.sub(payerBalanceBefore)).to.be.closeTo(
-        cryptoDeposit,
-        ethers.utils.parseEther("0.001") // Allow for gas costs
-      );
+      // Fulfill payment with transaction number
+      const transactionNumber = "123456789012"; // 12-digit transaction number
+      await expect(paymentEscrow.connect(payer).fulfillPayment(requestId, transactionNumber))
+        .to.emit(paymentEscrow, "PaymentFulfilled");
+
+      // Check that DAI was transferred to payer
+      const payerDAIBalanceAfter = await mockDAI.balanceOf(payer.address);
+      expect(payerDAIBalanceAfter.sub(payerDAIBalanceBefore)).to.equal(daiAmount);
 
       // Check request status
       const request = await paymentEscrow.getPaymentRequest(requestId);
-      expect(request.status).to.equal(1); // FULFILLED
+      expect(request.status).to.equal(2); // FULFILLED
       expect(request.payer).to.equal(payer.address);
     });
 
-    it("Should fail if requester tries to fulfill own request", async function () {
+    it("Should fail if requester tries to commit to own request", async function () {
       await expect(
-        paymentEscrow.connect(requester).fulfillPayment(requestId)
-      ).to.be.revertedWith("Cannot fulfill own request");
+        paymentEscrow.connect(requester).commitToPay(requestId)
+      ).to.be.revertedWith("Cannot commit to own request");
     });
 
     it("Should fail to fulfill non-existent request", async function () {
-      const fakeRequestId = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("fake-request"));
+      const transactionNumber = "123456789012";
+      await expect(
+        paymentEscrow.connect(payer).fulfillPayment(999, transactionNumber)
+      ).to.be.revertedWith("Request does not exist");
+    });
+
+    it("Should fail with invalid transaction number length", async function () {
+      await paymentEscrow.connect(payer).commitToPay(requestId);
+      
+      // Test short transaction number
+      await expect(
+        paymentEscrow.connect(payer).fulfillPayment(requestId, "12345")
+      ).to.be.revertedWith("Transaction number must be exactly 12 digits");
+      
+      // Test long transaction number
+      await expect(
+        paymentEscrow.connect(payer).fulfillPayment(requestId, "1234567890123")
+      ).to.be.revertedWith("Transaction number must be exactly 12 digits");
+    });
+
+    it("Should fail with non-numeric transaction number", async function () {
+      await paymentEscrow.connect(payer).commitToPay(requestId);
       
       await expect(
-        paymentEscrow.connect(payer).fulfillPayment(fakeRequestId)
-      ).to.be.revertedWith("Request does not exist");
+        paymentEscrow.connect(payer).fulfillPayment(requestId, "12345678901a")
+      ).to.be.revertedWith("Transaction number must contain only digits");
     });
   });
 
   describe("Payment Cancellation", function () {
-    let requestId;
+    let requestId = 1;
     let amountINR;
-    let cryptoDeposit;
+    let daiAmount;
+    let ethFee;
 
     beforeEach(async function () {
-      requestId = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("test-cancel"));
-      amountINR = ethers.utils.parseEther("1000");
-      cryptoDeposit = ethers.utils.parseEther("0.01");
+      amountINR = 1000;
+      daiAmount = ethers.utils.parseUnits("100", 18);
+      ethFee = ethers.utils.parseEther("0.1");
 
-      await paymentEscrow.connect(requester).createPaymentRequest(requestId, amountINR, {
-        value: cryptoDeposit
-      });
+      // Create a payment request
+      await mockDAI.connect(requester).approve(paymentEscrow.address, daiAmount);
+      await paymentEscrow.connect(requester).createPaymentRequest(
+        amountINR,
+        daiAmount,
+        { value: ethFee }
+      );
     });
 
     it("Should cancel request and refund crypto to requester", async function () {
-      const requesterBalanceBefore = await requester.getBalance();
+      const requesterDAIBalanceBefore = await mockDAI.balanceOf(requester.address);
 
       await expect(paymentEscrow.connect(requester).cancelPaymentRequest(requestId))
-        .to.emit(paymentEscrow, "PaymentCancelled")
-        .withArgs(requestId, requester.address, cryptoDeposit);
+        .to.emit(paymentEscrow, "PaymentCancelled");
 
-      // Check that crypto was refunded to requester
-      const requesterBalanceAfter = await requester.getBalance();
-      expect(requesterBalanceAfter.sub(requesterBalanceBefore)).to.be.closeTo(
-        cryptoDeposit,
-        ethers.utils.parseEther("0.001") // Allow for gas costs
-      );
+      // Check that DAI was refunded to requester
+      const requesterDAIBalanceAfter = await mockDAI.balanceOf(requester.address);
+      expect(requesterDAIBalanceAfter.sub(requesterDAIBalanceBefore)).to.equal(daiAmount);
 
       // Check request status
       const request = await paymentEscrow.getPaymentRequest(requestId);
-      expect(request.status).to.equal(2); // CANCELLED
+      expect(request.status).to.equal(3); // CANCELLED
     });
 
     it("Should fail if non-requester tries to cancel", async function () {
@@ -170,44 +219,47 @@ describe("PaymentEscrow", function () {
   });
 
   describe("Request Queries", function () {
-    it("Should get pending requests correctly", async function () {
+    it("Should get available requests correctly", async function () {
+      const amountINR = 1000;
+      const daiAmount = ethers.utils.parseUnits("100", 18);
+      const ethFee = ethers.utils.parseEther("0.1");
+
       // Create multiple requests
-      const requestId1 = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("pending-1"));
-      const requestId2 = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("pending-2"));
-      const amountINR = ethers.utils.parseEther("1000");
-      const cryptoDeposit = ethers.utils.parseEther("0.01");
+      await mockDAI.connect(requester).approve(paymentEscrow.address, daiAmount.mul(2));
+      
+      await paymentEscrow.connect(requester).createPaymentRequest(
+        amountINR,
+        daiAmount,
+        { value: ethFee }
+      );
+      
+      await paymentEscrow.connect(requester).createPaymentRequest(
+        amountINR,
+        daiAmount,
+        { value: ethFee }
+      );
 
-      await paymentEscrow.connect(requester).createPaymentRequest(requestId1, amountINR, {
-        value: cryptoDeposit
-      });
-      await paymentEscrow.connect(requester).createPaymentRequest(requestId2, amountINR, {
-        value: cryptoDeposit
-      });
-
-      const pendingRequests = await paymentEscrow.getPendingRequests();
-      expect(pendingRequests.length).to.equal(2);
-      expect(pendingRequests[0].requestId).to.equal(requestId1);
-      expect(pendingRequests[1].requestId).to.equal(requestId2);
+      const availableRequests = await paymentEscrow.getAvailableRequests();
+      expect(availableRequests.length).to.equal(2);
+      expect(availableRequests[0].requestId).to.equal(1);
+      expect(availableRequests[1].requestId).to.equal(2);
     });
 
     it("Should get user requests correctly", async function () {
-      const requestId = ethers.utils.keccak256(ethers.utils.toUtf8Bytes("user-request"));
-      const amountINR = ethers.utils.parseEther("1000");
-      const cryptoDeposit = ethers.utils.parseEther("0.01");
+      const amountINR = 1000;
+      const daiAmount = ethers.utils.parseUnits("100", 18);
+      const ethFee = ethers.utils.parseEther("0.1");
 
-      await paymentEscrow.connect(requester).createPaymentRequest(requestId, amountINR, {
-        value: cryptoDeposit
-      });
+      await mockDAI.connect(requester).approve(paymentEscrow.address, daiAmount);
+      await paymentEscrow.connect(requester).createPaymentRequest(
+        amountINR,
+        daiAmount,
+        { value: ethFee }
+      );
 
       const userRequests = await paymentEscrow.getUserRequests(requester.address);
       expect(userRequests.length).to.equal(1);
-      expect(userRequests[0].requestId).to.equal(requestId);
+      expect(userRequests[0].requestId).to.equal(1);
     });
   });
-
-  // Helper function to calculate expected expiry time
-  async function getExpectedExpiryTime() {
-    const latestBlock = await ethers.provider.getBlock("latest");
-    return latestBlock.timestamp + (24 * 60 * 60); // 24 hours
-  }
 });

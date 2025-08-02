@@ -29,12 +29,14 @@ contract PaymentEscrow is ReentrancyGuard, Ownable {
         uint256 createdAt;          // Timestamp when request was created
         uint256 committedAt;        // Timestamp when request was committed
         uint256 expiresAt;          // When the request expires
+        string transactionNumber;   // 12-digit UPI transaction number
     }
     
     mapping(uint256 => PaymentRequest) public paymentRequests;
     mapping(address => uint256[]) public userRequests; // Track user's requests
     
     uint256[] public allRequestIds; // Track all requests for enumeration
+    uint256 public nextRequestId = 1; // Auto-incrementing request ID counter
     
     // Platform fee configuration
     uint256 public constant PLATFORM_FEE = 10000; // Flat 10,000 wei platform fee
@@ -60,7 +62,8 @@ contract PaymentEscrow is ReentrancyGuard, Ownable {
         uint256 indexed requestId,
         address indexed payer,
         address tokenAddress,
-        uint256 tokenAmount
+        uint256 tokenAmount,
+        string transactionNumber
     );
     
     event PaymentCancelled(
@@ -96,20 +99,20 @@ contract PaymentEscrow is ReentrancyGuard, Ownable {
     
     /**
      * @dev Create a payment request with DAI deposit + ETH fee
-     * @param _requestId Numeric identifier linking to MongoDB record
      * @param _amountINR Amount in INR (with precision handling)
      * @param _daiAmount Amount of DAI to deposit
+     * @return requestId The auto-generated request ID
      */
     function createPaymentRequest(
-        uint256 _requestId,
         uint256 _amountINR,
         uint256 _daiAmount
-    ) external payable nonReentrant {
-        require(_requestId != 0, "Invalid request ID");
+    ) external payable nonReentrant returns (uint256) {
         require(_amountINR > 0, "Amount must be greater than 0");
         require(_daiAmount > 0, "DAI amount must be greater than 0");
         require(msg.value >= PLATFORM_FEE, "Must pay atleast equal to platform fee");
-        require(paymentRequests[_requestId].requestId == 0, "Request ID already exists");
+        
+        uint256 requestId = nextRequestId;
+        nextRequestId++;
         
         // Calculate payer fee (total ETH sent minus platform fee)
         uint256 payerFee = msg.value - PLATFORM_FEE;
@@ -124,7 +127,7 @@ contract PaymentEscrow is ReentrancyGuard, Ownable {
         uint256 expiresAt = block.timestamp + REQUEST_EXPIRY_DURATION;
         
         PaymentRequest memory newRequest = PaymentRequest({
-            requestId: _requestId,
+            requestId: requestId,
             requester: msg.sender,
             payer: address(0),
             amountINR: _amountINR,
@@ -134,15 +137,16 @@ contract PaymentEscrow is ReentrancyGuard, Ownable {
             status: PaymentStatus.PENDING,
             createdAt: block.timestamp,
             committedAt: 0,
-            expiresAt: expiresAt
+            expiresAt: expiresAt,
+            transactionNumber: ""
         });
         
-        paymentRequests[_requestId] = newRequest;
-        userRequests[msg.sender].push(_requestId);
-        allRequestIds.push(_requestId);
+        paymentRequests[requestId] = newRequest;
+        userRequests[msg.sender].push(requestId);
+        allRequestIds.push(requestId);
         
         emit PaymentRequestCreated(
-            _requestId,
+            requestId,
             msg.sender,
             _amountINR,
             DAI_TOKEN,
@@ -150,6 +154,8 @@ contract PaymentEscrow is ReentrancyGuard, Ownable {
             payerFee,
             expiresAt
         );
+        
+        return requestId;
     }
     
     /**
@@ -186,8 +192,9 @@ contract PaymentEscrow is ReentrancyGuard, Ownable {
     /**
      * @dev Fulfill a payment request by transferring crypto to payer
      * @param _requestId The request to fulfill
+     * @param _transactionNumber 12-digit UPI transaction number
      */
-    function fulfillPayment(uint256 _requestId) external nonReentrant {
+    function fulfillPayment(uint256 _requestId, string memory _transactionNumber) external nonReentrant {
         PaymentRequest storage request = paymentRequests[_requestId];
         
         require(request.requestId != 0, "Request does not exist");
@@ -195,8 +202,11 @@ contract PaymentEscrow is ReentrancyGuard, Ownable {
         require(block.timestamp <= request.expiresAt, "Request expired");
         require(msg.sender == request.payer, "Only committed payer can fulfill");
         require(block.timestamp <= request.committedAt + COMMITMENT_TIMEOUT, "Commitment timed out");
+        require(bytes(_transactionNumber).length == 12, "Transaction number must be exactly 12 digits");
+        require(isNumericString(_transactionNumber), "Transaction number must contain only digits");
         
         request.status = PaymentStatus.FULFILLED;
+        request.transactionNumber = _transactionNumber;
         
         // Transfer full DAI amount to payer (no platform fee deducted from DAI)
         IERC20(DAI_TOKEN).safeTransfer(msg.sender, request.daiAmount);
@@ -207,7 +217,7 @@ contract PaymentEscrow is ReentrancyGuard, Ownable {
             require(success, "Payer fee transfer failed");
         }
         
-        emit PaymentFulfilled(_requestId, msg.sender, DAI_TOKEN, request.daiAmount);
+        emit PaymentFulfilled(_requestId, msg.sender, DAI_TOKEN, request.daiAmount, _transactionNumber);
     }
     
     /**
@@ -467,6 +477,27 @@ contract PaymentEscrow is ReentrancyGuard, Ownable {
      */
     function getPlatformFee() external pure returns (uint256) {
         return PLATFORM_FEE;
+    }
+    
+    /**
+     * @dev Get the next request ID that will be assigned
+     */
+    function getNextRequestId() external view returns (uint256) {
+        return nextRequestId;
+    }
+    
+    /**
+     * @dev Check if a string contains only numeric characters
+     * @param _str The string to check
+     */
+    function isNumericString(string memory _str) internal pure returns (bool) {
+        bytes memory strBytes = bytes(_str);
+        for (uint i = 0; i < strBytes.length; i++) {
+            if (strBytes[i] < 0x30 || strBytes[i] > 0x39) {
+                return false; // Not a digit (0-9)
+            }
+        }
+        return true;
     }
     
 }
