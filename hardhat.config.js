@@ -23,7 +23,7 @@ module.exports = {
     settings: {
       optimizer: {
         enabled: true,
-        runs: 200
+        runs: 1000 // Increase optimizer runs to reduce deployment gas cost
       }
     }
   },
@@ -43,7 +43,9 @@ module.exports = {
     base: {
       url: "https://mainnet.base.org",
       accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
-      chainId: 8453
+      chainId: 8453,
+      gasPrice: 10000000, // 0.01 gwei - Base has low gas fees but needs minimum
+      gas: 6000000 // Increase gas limit for contract deployment
     }
   },
   paths: {

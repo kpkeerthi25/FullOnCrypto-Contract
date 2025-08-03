@@ -139,8 +139,57 @@ async function main() {
   // Deploy PaymentEscrow with DAI token address
   const PaymentEscrow = await hre.ethers.getContractFactory("PaymentEscrow", deployer);
   console.log(`Deploying PaymentEscrow with DAI token: ${daiTokenAddress}`);
-  const paymentEscrow = await PaymentEscrow.deploy(daiTokenAddress);
-  await paymentEscrow.deployed();
+  
+  let paymentEscrow;
+  
+  // Estimate gas for deployment
+  try {
+    const deployData = PaymentEscrow.getDeployTransaction(daiTokenAddress);
+    const estimatedGas = await deployer.estimateGas(deployData);
+    console.log(`Estimated gas for deployment: ${estimatedGas.toString()}`);
+    
+    // Set gas parameters for Base mainnet
+    let deployOptions = {};
+    if (isMainnet) {
+      // Add 50% buffer to estimated gas
+      const gasLimit = estimatedGas.mul(150).div(100);
+      
+      // Try to get current gas price from network
+      let gasPrice;
+      try {
+        const feeData = await deployer.provider.getFeeData();
+        gasPrice = feeData.gasPrice || hre.ethers.utils.parseUnits('0.01', 'gwei');
+        console.log(`Network suggested gas price: ${hre.ethers.utils.formatUnits(gasPrice, 'gwei')} gwei`);
+      } catch (e) {
+        gasPrice = hre.ethers.utils.parseUnits('0.01', 'gwei');
+        console.log(`Using fallback gas price: ${hre.ethers.utils.formatUnits(gasPrice, 'gwei')} gwei`);
+      }
+      
+      deployOptions = {
+        gasLimit: gasLimit,
+        gasPrice: gasPrice
+      };
+      console.log(`Using mainnet gas settings: gasLimit=${gasLimit.toString()}, gasPrice=${hre.ethers.utils.formatUnits(deployOptions.gasPrice, 'gwei')} gwei`);
+    }
+    
+    paymentEscrow = await PaymentEscrow.deploy(daiTokenAddress, deployOptions);
+    await paymentEscrow.deployed();
+  } catch (gasEstimationError) {
+    console.log("Gas estimation failed, using default settings:", gasEstimationError.message);
+    
+    // Fallback to higher gas limit if estimation fails
+    let deployOptions = {};
+    if (isMainnet) {
+      deployOptions = {
+        gasLimit: 8000000, // Higher fallback gas limit
+        gasPrice: hre.ethers.utils.parseUnits('0.1', 'gwei') // Higher fallback gas price for Base
+      };
+      console.log(`Using fallback gas settings: gasLimit=${deployOptions.gasLimit}, gasPrice=${hre.ethers.utils.formatUnits(deployOptions.gasPrice, 'gwei')} gwei`);
+    }
+    
+    paymentEscrow = await PaymentEscrow.deploy(daiTokenAddress, deployOptions);
+    await paymentEscrow.deployed();
+  }
   
   console.log("PaymentEscrow deployed to:", paymentEscrow.address);
   console.log("PaymentEscrow owner:", deployer.address);
